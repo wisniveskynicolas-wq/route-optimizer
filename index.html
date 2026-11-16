@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Route Optimizer</title>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1c2430; --mute:#667085; --line:#e4e7ec; --accent:#1a73e8; --warn:#b54708; --err:#b42318; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--ink); }
+  main { max-width:760px; margin:0 auto; padding:20px 16px 60px; }
+  h1 { font-size:22px; margin:8px 0 4px; }
+  .sub { color:var(--mute); margin:0 0 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:14px; }
+  label { display:block; font-weight:600; font-size:13px; margin:12px 0 4px; }
+  label:first-child { margin-top:0; }
+  input, textarea, select { width:100%; padding:9px 10px; border:1px solid var(--line); border-radius:8px; font:inherit; background:#fff; }
+  textarea { min-height:130px; resize:vertical; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; }
+  .row > div { flex:1 1 200px; }
+  .hint { color:var(--mute); font-size:12.5px; margin-top:4px; }
+  button { font:inherit; font-weight:600; border:0; border-radius:8px; padding:10px 16px; cursor:pointer; background:var(--accent); color:#fff; }
+  button.secondary { background:#eef2f7; color:var(--ink); }
+  button:disabled { opacity:.55; cursor:default; }
+  .actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:14px; }
+  .check { display:flex; align-items:center; gap:8px; margin-top:12px; font-weight:500; }
+  .check input { width:auto; }
+  details summary { cursor:pointer; font-weight:600; }
+  ol.route { list-style:none; padding:0; margin:12px 0 0; }
+  ol.route li { display:flex; gap:12px; padding:10px 0; border-top:1px solid var(--line); }
+  ol.route li:first-child { border-top:0; }
+  .num { flex:0 0 28px; height:28px; border-radius:50%; background:var(--accent); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:13px; }
+  .leg { color:var(--mute); font-size:13px; }
+  .totals { display:flex; gap:20px; flex-wrap:wrap; font-weight:600; }
+  .msg { padding:10px 12px; border-radius:8px; margin-top:12px; font-size:14px; }
+  .err { background:#fef3f2; color:var(--err); }
+  .warn { background:#fffaeb; color:var(--warn); }
+  .ok { background:#ecfdf3; color:#067647; }
+  #map { height:480px; border-radius:10px; border:1px solid var(--line); margin-bottom:12px; }
+  table.det { width:100%; border-collapse:collapse; font-size:14px; margin-top:8px; }
+  table.det th { text-align:left; color:var(--mute); font-size:12px; font-weight:600; padding:4px 6px; }
+  table.det td { padding:6px; border-top:1px solid var(--line); vertical-align:top; }
+  table.det td.n, table.det th.n { white-space:nowrap; text-align:right; }
+  .bar { height:6px; border-radius:3px; background:#d93025; margin-top:4px; }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; }
+  a.btn { display:inline-block; text-decoration:none; font-weight:600; border-radius:8px; padding:10px 16px; background:#0b8043; color:#fff; }
+  ol.steps { padding-left:20px; margin:8px 0; font-size:13.5px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Route Optimizer</h1>
+  <p class="sub">Orders your stops to minimize drive time using Google's traffic data, plots the route, and flags the stops that add the most driving.</p>
+
+  <details class="card" id="keybox">
+    <summary>Google API key (needed for optimization and the map)</summary>
+    <label for="key">API key</label>
+    <input id="key" type="password" placeholder="AIza..." autocomplete="off">
+    <div class="hint">Stored only in this browser. Enable the <b>Routes API</b> and the <b>Maps JavaScript API</b> (for the map) on the key, plus the <b>Geocoding API</b> only if you use street addresses on runs over 25 stops. Stops given as coordinates (lat, lng) need no Geocoding API. Without a key, the tool still builds a Google Maps link in the order you typed.</div>
+  </details>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <label for="start">Start</label>
+        <input id="start" placeholder="Home or office address">
+      </div>
+      <div>
+        <label for="end">End</label>
+        <input id="end" placeholder="Leave blank to end at the last stop">
+      </div>
+    </div>
+    <div class="check"><input type="checkbox" id="roundtrip"><label for="roundtrip" style="margin:0;font-weight:500">Round trip (end back at start)</label></div>
+
+    <label for="stops">Stops (one per line, up to 150: addresses or coordinates)</label>
+    <input type="file" id="file" accept=".txt,.csv,.tsv,text/plain" style="margin-bottom:6px">
+    <textarea id="stops" placeholder="123 Main St, Newark, NJ&#10;Jersey City office, 40.7178, -74.0431&#10;40.7357, -74.1724"></textarea>
+
+    <div class="row">
+      <div>
+        <label for="when">Departure</label>
+        <select id="when">
+          <option value="now">Now (live traffic)</option>
+          <option value="later">Pick a future time (predicted traffic)</option>
+        </select>
+      </div>
+      <div id="whenbox" style="display:none">
+        <label for="dt">Date and time</label>
+        <input type="datetime-local" id="dt">
+      </div>
+      <div>
+        <label for="mode">Travel mode</label>
+        <select id="mode">
+          <option value="DRIVE">Drive</option>
+          <option value="TWO_WHEELER">Motorcycle / scooter</option>
+        </select>
+      </div>
+      <div>
+        <label for="dwell">Minutes at each stop</label>
+        <input type="number" id="dwell" min="0" value="0">
+      </div>
+    </div>
+
+    <label for="engine">Optimizer</label>
+    <select id="engine">
+      <option value="routes">Standard (Routes API, API key only; batches of 24 stops)</option>
+      <option value="ro">Exact (Route Optimization API; Google sign-in; whole route and multi-day)</option>
+    </select>
+
+    <div id="ropanel" style="display:none;margin-top:12px;border:1px solid var(--line);border-radius:10px;padding:12px">
+      <div class="row">
+        <div><label for="clientid">OAuth client ID</label><input id="clientid" placeholder="123456-abc.apps.googleusercontent.com" autocomplete="off"></div>
+        <div><label for="project">Google Cloud project ID</label><input id="project" placeholder="my-route-project" autocomplete="off"></div>
+      </div>
+      <div class="row">
+        <div><label for="days">Days (number of separate trips)</label><input type="number" id="days" min="1" max="10" value="1"></div>
+        <div><label for="maxh">Max hours per day</label><input type="number" id="maxh" min="1" step="0.5" placeholder="No limit"><div class="hint">Includes driving and time at stops. Required when days is more than 1.</div></div>
+      </div>
+      <div class="actions" style="align-items:center">
+        <button class="secondary" id="signin" type="button">Sign in with Google</button>
+        <span id="rostatus" class="hint" style="margin:0">Not signed in.</span>
+      </div>
+      <div id="romsg"></div>
+      <details style="margin-top:10px"><summary>One-time setup</summary>
+        <ol class="steps">
+          <li>Open this page from a web address, not a local file: run <code>python3 -m http.server 8000</code> in this folder and visit <code>http://localhost:8000</code>, or host it on GitHub Pages.</li>
+          <li>In Google Cloud, enable the <b>Route Optimization API</b> for your project.</li>
+          <li>Go to <b>APIs &amp; Services, then OAuth consent screen</b>. Choose External, fill in the basics, and add your own Google account under <b>Test users</b>.</li>
+          <li>Go to <b>Credentials, then Create credentials, then OAuth client ID</b>. Type: Web application. Under <b>Authorized JavaScript origins</b>, add the address from step 1 (for example <code>http://localhost:8000</code>).</li>
+          <li>Paste the client ID and your project ID above, then press Sign in with Google. Sign in again about once an hour.</li>
+        </ol>
+      </details>
+    </div>
+
+    <div class="actions">
+      <button id="go">Optimize route</button>
+      <button class="secondary" id="linkonly">Open as typed (no key)</button>
+      <button class="secondary" id="clear">Clear</button>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <div class="card" id="result" style="display:none"></div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const store = {
+  get(k){ try { return localStorage.getItem(k) } catch(e){ return null } },
+  set(k,v){ try { localStorage.setItem(k,v) } catch(e){} }
+};
+const FIELDS = ["key","start","end","stops","clientid","project","days","maxh"];
+FIELDS.forEach(id => { const v = store.get("ro_"+id); if (v) $(id).value = v; });
+if (store.get("ro_round")==="1") $("roundtrip").checked = true;
+if (store.get("ro_engine")==="ro") $("engine").value = "ro";
+if (!$("key").value) $("keybox").open = true;
+$("ropanel").style.display = $("engine").value === "ro" ? "" : "none";
+$("engine").onchange = () => { $("ropanel").style.display = $("engine").value === "ro" ? "" : "none"; save(); };
+$("file").onchange = async () => {
+  const f = $("file").files[0]; if (!f) return;
+  $("stops").value = (await f.text()).replace(/\r/g, "").trim(); save();
+  const n = $("stops").value.split("\n").filter(l => l.trim() && !(/latitude/i.test(l) && !parseLoc(l).pt)).length;
+  msg(`Loaded ${n} stops from ${f.name}.`);
+};
+$("when").onchange = () => { $("whenbox").style.display = $("when").value==="later" ? "" : "none"; };
+$("roundtrip").onchange = () => { $("end").disabled = $("roundtrip").checked; };
+$("end").disabled = $("roundtrip").checked;
+
+function save(){
+  FIELDS.forEach(id => store.set("ro_"+id, $(id).value));
+  store.set("ro_round", $("roundtrip").checked ? "1" : "0");
+  store.set("ro_engine", $("engine").value);
+}
+function msg(text, cls){ $("status").innerHTML = text ? `<div class="msg ${cls||""}"></div>` : ""; if (text) $("status").firstChild.textContent = text; }
+function esc(s){ return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function fmtDur(sec){ const m = Math.round(sec/60); const h = Math.floor(m/60); return h ? `${h} hr ${m%60} min` : `${m} min`; }
+function fmtDist(m){ return (m/1609.344).toFixed(1) + " mi"; }
+function secs(d){ return d ? Math.round(parseFloat(String(d).replace("s",""))) || 0 : 0; }
+
+function readInputs(){
+  const start = $("start").value.trim();
+  const stops = $("stops").value.split(/\r?\n/).map(s => s.replace(/^[\[\s]+|[\]\s]+$/g, "")).filter(Boolean)
+    .filter(l => !(/latitude/i.test(l) && !parseLoc(l).pt));
+  const round = $("roundtrip").checked;
+  const end = round ? start : $("end").value.trim();
+  return { start, end, stops, round };
+}
+function parseLoc(str){
+  // Accepts a plain address, "lat, lng", "label, lat, lng", or a spreadsheet row (tab-separated, e.g.
+  // Address <tab> Name <tab> Latitude <tab> Longitude). Addresses in tabbed rows may contain commas.
+  const tabbed = str.includes("\t");
+  const parts = str.split(tabbed ? /\t/ : /[;,]/).map(x => x.trim()).filter(Boolean);
+  const num = /^-?\d+(\.\d+)?$/;
+  for (let k = 0; k < parts.length - 1; k++) {
+    if (num.test(parts[k]) && num.test(parts[k+1])) {
+      const a = +parts[k], b = +parts[k+1];
+      if (Math.abs(a) <= 90 && Math.abs(b) <= 180) {
+        const rest = [...parts.slice(0, k), ...parts.slice(k + 2)];
+        let label;
+        if (!rest.length) label = `${a}, ${b}`;
+        else if (tabbed && rest.length > 1) {
+          const sorted = [...rest].sort((x, y) => x.length - y.length);
+          label = `${sorted[0]} (${sorted[sorted.length - 1]})`;
+        } else label = rest.join(", ");
+        return { pt: { lat: a, lng: b }, label, q: `${a},${b}` };
+      }
+    }
+  }
+  const m = str.match(/^(.*?)[\s,;]+(-?\d{1,2}\.\d+)[\s,;]+(-?\d{1,3}\.\d+)\s*$/);
+  if (m && Math.abs(+m[2]) <= 90 && Math.abs(+m[3]) <= 180) {
+    const a = +m[2], b = +m[3];
+    return { pt: { lat: a, lng: b }, label: m[1].trim() || `${a}, ${b}`, q: `${a},${b}` };
+  }
+  return { pt: null, label: str, q: str };
+}
+function mapsLinks(points, mode){
+  points = points.map(p => parseLoc(p).q);
+  // Google Maps URLs hold at most 9 waypoints, so long routes are split into linked parts.
+  const tm = mode === "TWO_WHEELER" ? "two-wheeler" : "driving";
+  const links = [];
+  for (let s = 0; s < points.length - 1; s += 10) {
+    const part = points.slice(s, s + 11);
+    const p = new URLSearchParams({ api: "1", origin: part[0], destination: part[part.length-1], travelmode: tm });
+    if (part.length > 2) p.set("waypoints", part.slice(1, -1).join("|"));
+    links.push({ from: s + 1, to: s + part.length, url: "https://www.google.com/maps/dir/?" + p.toString() });
+  }
+  return links;
+}
+function validate(i){
+  if (!i.start) return "Enter a start address.";
+  if (!i.stops.length) return "Enter at least one stop.";
+  if (i.stops.length > 150) return "Limit is 150 stops per run.";
+  return null;
+}
+
+$("linkonly").onclick = () => {
+  save();
+  const i = readInputs(); const e = validate(i);
+  if (e) return msg(e, "err");
+  const ordered = [i.start, ...i.stops, ...(i.end ? [i.end] : [])];
+  const locs = ordered.map(a => parseLoc(a).pt);
+  const allCoords = locs.every(Boolean);
+  render({ days: [{ label: "", ordered, links: mapsLinks(ordered, $("mode").value), paths: allCoords ? [{ pts: locs.map(p => [p.lat, p.lng]), part: 0, straight: true }] : null }],
+    note: "Order is exactly as typed." + (allCoords ? " The map shows straight lines between stops; use the Google Maps buttons for real roads and live times." : " Google Maps shows live travel times when it opens.") });
+  msg("");
+};
+$("clear").onclick = () => { ["start","end","stops"].forEach(id => $(id).value=""); $("result").style.display="none"; msg(""); save(); };
+
+const ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes";
+const ll = p => ({ location: { latLng: { latitude: p.lat, longitude: p.lng } } });
+
+function baseBody(mode, depMs, nInter){
+  const b = { travelMode: mode, units: "IMPERIAL", departureTime: new Date(depMs).toISOString() };
+  if (mode === "DRIVE") {
+    // Google does not allow optimizeWaypointOrder with TRAFFIC_AWARE_OPTIMAL, so reordering uses TRAFFIC_AWARE.
+    if (nInter >= 2) { b.routingPreference = "TRAFFIC_AWARE"; b.optimizeWaypointOrder = true; }
+    else b.routingPreference = "TRAFFIC_AWARE_OPTIMAL";
+  }
+  return b;
+}
+async function routeCall(key, body){
+  const res = await fetch(ROUTES_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": key,
+      "X-Goog-FieldMask": "routes.duration,routes.distanceMeters,routes.optimizedIntermediateWaypointIndex,routes.polyline.encodedPolyline,routes.legs.duration,routes.legs.distanceMeters,routes.legs.startLocation,routes.legs.endLocation"
+    },
+    body: JSON.stringify(body)
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error("Google returned an error: " + (data.error?.message || "HTTP " + res.status));
+  const r = data.routes && data.routes[0];
+  if (!r) throw new Error("No route found. Check that every address is specific enough.");
+  return r;
+}
+
+// ---- Straight-line heuristic used to pre-order large runs (Standard engine) ----
+function hav(a, b){
+  const R = 3958.8, t = Math.PI / 180;
+  const dLa = (b.lat - a.lat) * t, dLo = (b.lng - a.lng) * t;
+  const x = Math.sin(dLa/2)**2 + Math.cos(a.lat*t) * Math.cos(b.lat*t) * Math.sin(dLo/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(x));
+}
+function tour(S, E, pts){
+  const left = new Set(pts.map((_, k) => k)); const ord = []; let cur = S;
+  while (left.size) {
+    let best = -1, bd = Infinity;
+    for (const k of left) { const d = hav(cur, pts[k]); if (d < bd) { bd = d; best = k; } }
+    ord.push(best); left.delete(best); cur = pts[best];
+  }
+  const P = [S, ...ord.map(k => pts[k])]; const idx = [-1, ...ord];
+  if (E) { P.push(E); idx.push(-2); }
+  const lastMov = E ? P.length - 2 : P.length - 1;
+  let improved = true, pass = 0;
+  while (improved && pass++ < 50) {
+    improved = false;
+    for (let a = 1; a < lastMov; a++) for (let b = a + 1; b <= lastMov; b++) {
+      const nx = P[b+1];
+      const before = hav(P[a-1], P[a]) + (nx ? hav(P[b], nx) : 0);
+      const after  = hav(P[a-1], P[b]) + (nx ? hav(P[a], nx) : 0);
+      if (after < before - 1e-9) {
+        const sp = P.slice(a, b+1).reverse(); P.splice(a, sp.length, ...sp);
+        const si = idx.slice(a, b+1).reverse(); idx.splice(a, si.length, ...si);
+        improved = true;
+      }
+    }
+  }
+  return idx.filter(k => k >= 0);
+}
+
+async function geocodeAll(names, key){
+  let cache = {}; try { cache = JSON.parse(store.get("ro_geo") || "{}"); } catch(e) {}
+  const out = new Array(names.length); const todo = [];
+  names.forEach((n, k) => { const p = parseLoc(n).pt, c = cache[n.toLowerCase()]; if (p) out[k] = p; else if (c) out[k] = c; else todo.push(k); });
+  for (let b = 0; b < todo.length; b += 8) {
+    await Promise.all(todo.slice(b, b + 8).map(async k => {
+      const u = "https://maps.googleapis.com/maps/api/geocode/json?address=" + encodeURIComponent(names[k]) + "&key=" + encodeURIComponent(key);
+      const d = await (await fetch(u)).json();
+      if (d.status !== "OK") throw new Error(`Couldn't locate "${names[k]}" (${d.status}${d.error_message ? ": " + d.error_message : ""}). Street addresses on large runs or with the Exact optimizer need the Geocoding API enabled on your key. Coordinates (lat, lng) skip that step.`);
+      const loc = d.results[0].geometry.location;
+      out[k] = { lat: loc.lat, lng: loc.lng }; cache[names[k].toLowerCase()] = out[k];
+    }));
+    msg(`Looking up addresses... ${Math.min(b + 8, todo.length)} of ${todo.length}`);
+  }
+  store.set("ro_geo", JSON.stringify(cache));
+  return out;
+}
+
+function decodePoly(str){
+  let i = 0, lat = 0, lng = 0; const out = [];
+  while (i < str.length) {
+    let b, sh = 0, r = 0;
+    do { b = str.charCodeAt(i++) - 63; r |= (b & 31) << sh; sh += 5; } while (b >= 32);
+    lat += (r & 1) ? ~(r >> 1) : (r >> 1);
+    sh = 0; r = 0;
+    do { b = str.charCodeAt(i++) - 63; r |= (b & 31) << sh; sh += 5; } while (b >= 32);
+    lng += (r & 1) ? ~(r >> 1) : (r >> 1);
+    out.push([lat / 1e5, lng / 1e5]);
+  }
+  return out;
+}
+const toLL = x => x && x.latLng ? { lat: x.latLng.latitude, lng: x.latLng.longitude } : null;
+const mapLeg = l => ({ sec: secs(l.duration), m: l.distanceMeters || 0, a: toLL(l.startLocation), b: toLL(l.endLocation) });
+const pathOf = (r, part) => ({ pts: r.polyline && r.polyline.encodedPolyline ? decodePoly(r.polyline.encodedPolyline) : [], part });
+
+// ---- Map (Google Maps JavaScript API) ----
+const DAYCOL = ["#1a73e8", "#f29900", "#9334e6", "#12b5cb", "#795548", "#e91e63", "#5f6368", "#7cb342"];
+let gmapsPromise = null;
+function mapNote(html){ const el = $("map"); if (el) el.innerHTML = `<div class="hint" style="padding:14px">${html}</div>`; }
+function loadGoogleMaps(key){
+  if (window.google && window.google.maps && window.google.maps.Map) return Promise.resolve();
+  if (gmapsPromise) return gmapsPromise;
+  gmapsPromise = new Promise((resolve, reject) => {
+    window.__gmapsReady = resolve;
+    window.gm_authFailure = () => { gmapsPromise = null; mapNote('Google rejected the key for the <b>Maps JavaScript API</b>. Enable that API in your Google Cloud project and add it to the key\'s allowed APIs (and make sure billing is on).'); };
+    const sc = document.createElement("script");
+    sc.src = "https://maps.googleapis.com/maps/api/js?key=" + encodeURIComponent(key) + "&callback=__gmapsReady";
+    sc.onerror = () => { gmapsPromise = null; reject(new Error("load failed")); };
+    document.head.appendChild(sc);
+  });
+  return gmapsPromise;
+}
+async function drawMap(markers, paths, key){
+  const el = $("map"); if (!el) return;
+  if (!key) return mapNote("Add your Google API key to see the map.");
+  mapNote("Loading map...");
+  try { await loadGoogleMaps(key); } catch (e) { return mapNote("The map could not load. Check your internet connection."); }
+  if (!el.isConnected || !(window.google && google.maps && google.maps.Map)) return;
+  el.innerHTML = "";
+  const m = new google.maps.Map(el, { mapTypeControl: false, streetViewControl: false });
+  const bounds = new google.maps.LatLngBounds();
+  (paths || []).forEach(p => {
+    if (!p.pts.length) return;
+    const path = p.pts.map(x => ({ lat: x[0], lng: x[1] }));
+    const color = DAYCOL[p.part % DAYCOL.length];
+    new google.maps.Polyline(p.straight
+      ? { map: m, path, strokeColor: color, strokeOpacity: 0, icons: [{ icon: { path: "M 0,-1 0,1", strokeOpacity: 1, scale: 3 }, offset: "0", repeat: "12px" }] }
+      : { map: m, path, strokeColor: color, strokeOpacity: 0.85, strokeWeight: 4 });
+    path.forEach(x => bounds.extend(x));
+  });
+  const info = new google.maps.InfoWindow();
+  markers.forEach(mk => {
+    const g = new google.maps.Marker({
+      map: m, position: mk.p, zIndex: mk.z,
+      icon: { path: google.maps.SymbolPath.CIRCLE, scale: 12, fillColor: mk.color, fillOpacity: 1, strokeColor: "#ffffff", strokeWeight: 2 },
+      label: { text: mk.text, color: "#ffffff", fontSize: "11px", fontWeight: "700" }
+    });
+    g.addListener("click", () => { info.setContent(mk.popup); info.open(m, g); });
+    bounds.extend(mk.p);
+  });
+  if (!bounds.isEmpty()) m.fitBounds(bounds, 30);
+}
+
+// ---- Standard engine (Routes API) ----
+async function solveSmall(i, key, mode, start0){
+  const inter = i.end ? i.stops : i.stops.slice(0, -1);
+  const dest = i.end || i.stops[i.stops.length - 1];
+  const body = baseBody(mode, start0, inter.length);
+  const wp = a => { const p = parseLoc(a).pt; return p ? ll(p) : { address: a }; };
+  body.origin = wp(i.start); body.destination = wp(dest);
+  body.intermediates = inter.map(wp);
+  const r = await routeCall(key, body);
+  const idx = (r.optimizedIntermediateWaypointIndex && r.optimizedIntermediateWaypointIndex.length === inter.length) ? r.optimizedIntermediateWaypointIndex : inter.map((_, k) => k);
+  const ordered = [i.start, ...idx.map(k => inter[k]), dest];
+  return { days: [{
+    label: "", ordered, links: mapsLinks(ordered, mode),
+    legs: (r.legs || []).map(mapLeg), paths: [pathOf(r, 0)],
+    total: { sec: secs(r.duration), m: r.distanceMeters || 0 }
+  }], note: i.end ? "" : "Your last typed stop is treated as the final stop; the others were reordered." };
+}
+
+async function solveBig(i, key, mode, start0, dwell){
+  const names = [i.start, ...i.stops, ...(i.end ? [i.end] : [])];
+  const pts = await geocodeAll(names, key);
+  const S = pts[0], E = i.end ? pts[pts.length - 1] : null;
+  const stopPts = pts.slice(1, 1 + i.stops.length);
+  const order = tour(S, E, stopPts);
+  const groups = []; for (let k = 0; k < order.length; k += 24) groups.push(order.slice(k, k + 24));
+
+  let origin = { pt: S };
+  const ordered = [i.start], legs = [], paths = []; let totalSec = 0, totalM = 0, clock = start0;
+  for (let g = 0; g < groups.length; g++) {
+    msg(`Optimizing with live traffic: part ${g + 1} of ${groups.length}...`);
+    const grp = groups[g]; let dest, inter, destIsStop = false;
+    if (g === groups.length - 1 && E) { dest = { name: i.end, pt: E }; inter = grp; }
+    else { const di = grp[grp.length - 1]; dest = { name: i.stops[di], pt: stopPts[di] }; inter = grp.slice(0, -1); destIsStop = true; }
+    const body = baseBody(mode, clock, inter.length);
+    body.origin = ll(origin.pt); body.destination = ll(dest.pt); body.intermediates = inter.map(k => ll(stopPts[k]));
+    const r = await routeCall(key, body);
+    const idx = (r.optimizedIntermediateWaypointIndex && r.optimizedIntermediateWaypointIndex.length === inter.length) ? r.optimizedIntermediateWaypointIndex : inter.map((_, k) => k);
+    idx.forEach(k => ordered.push(i.stops[inter[k]]));
+    ordered.push(dest.name);
+    (r.legs || []).forEach(l => legs.push(mapLeg(l))); paths.push(pathOf(r, g));
+    const sec = secs(r.duration); totalSec += sec; totalM += r.distanceMeters || 0;
+    clock += (sec + dwell * (inter.length + (destIsStop ? 1 : 0))) * 1000;
+    origin = dest;
+  }
+  return { days: [{ label: "", ordered, legs, paths, links: mapsLinks(ordered, mode), total: { sec: totalSec, m: totalM } }],
+    note: `Large run: stops were grouped by location, then each batch of up to 24 was re-ordered with live traffic. The last stop of each batch is fixed, so this is very good but not guaranteed to be the single best order. For a whole-route solve, use the Exact optimizer.` };
+}
+
+// ---- Exact engine (Route Optimization API, Google sign-in) ----
+const roAuth = { token: null, exp: 0 };
+function roMsg(text, cls){ $("romsg").innerHTML = text ? `<div class="msg ${cls||"err"}"></div>` : ""; if (text) $("romsg").firstChild.textContent = text; }
+function roStatus(){
+  const left = roAuth.exp - Date.now();
+  $("rostatus").textContent = roAuth.token && left > 0 ? `Signed in. Expires in about ${Math.max(1, Math.round(left/60000))} min.` : "Not signed in.";
+}
+setInterval(roStatus, 30000);
+$("signin").onclick = () => {
+  save();
+  const cid = $("clientid").value.trim();
+  if (!cid) return roMsg("Paste your OAuth client ID first (see One-time setup).");
+  if (location.protocol === "file:") return roMsg("Google sign-in does not work from a local file. Run python3 -m http.server 8000 in this folder and open http://localhost:8000, or host the page on GitHub Pages.");
+  if (!(window.google && google.accounts && google.accounts.oauth2)) return roMsg("The Google sign-in library has not loaded. Check your internet connection and try again.");
+  const tc = google.accounts.oauth2.initTokenClient({
+    client_id: cid,
+    scope: "https://www.googleapis.com/auth/cloud-platform",
+    callback: r => {
+      if (r.error) return roMsg("Sign-in failed: " + (r.error_description || r.error));
+      roAuth.token = r.access_token; roAuth.exp = Date.now() + (parseInt(r.expires_in, 10) || 3600) * 1000;
+      roMsg(""); roStatus();
+    },
+    error_callback: e => roMsg("Sign-in window problem: " + ((e && e.type) || "unknown") + ". Allow pop-ups for this page and try again.")
+  });
+  tc.requestAccessToken();
+};
+
+async function solveRO(i, key, start0, dwell){
+  if (!roAuth.token || Date.now() > roAuth.exp - 60000) throw new Error("Sign in with Google first (button in the Exact optimizer panel).");
+  const project = $("project").value.trim();
+  if (!project) throw new Error("Enter your Google Cloud project ID in the Exact optimizer panel.");
+  const nDays = Math.max(1, Math.min(10, parseInt($("days").value, 10) || 1));
+  const maxH = parseFloat($("maxh").value) || 0;
+  if (nDays > 1 && !maxH) throw new Error("With more than one day, set a maximum number of hours per day.");
+
+  const names = [i.start, ...i.stops, ...(i.end ? [i.end] : [])];
+  const pts = await geocodeAll(names, key);
+  const S = pts[0], E = i.end ? pts[pts.length - 1] : null;
+  const stopPts = pts.slice(1, 1 + i.stops.length);
+  const dep = Math.max(start0, Date.now() + 180000);
+  const iso = ms => new Date(Math.floor(ms / 1000) * 1000).toISOString().replace(".000Z", "Z");  // whole seconds only; the API rejects fractions
+
+  const vehicle = {
+    startWaypoint: ll(S), costPerHour: 60,
+    startTimeWindows: [{ startTime: iso(dep), endTime: iso(dep) }]
+  };
+  if (E) vehicle.endWaypoint = ll(E);
+  if (maxH) vehicle.routeDurationLimit = { maxDuration: Math.round(maxH * 3600) + "s" };
+  const body = {
+    timeout: "45s", considerRoadTraffic: true, populatePolylines: true, populateTransitionPolylines: true,
+    model: {
+      globalStartTime: iso(dep), globalEndTime: iso(dep + 7 * 86400000),
+      shipments: stopPts.map((p, k) => ({ label: String(k), penaltyCost: 1000000,
+        deliveries: [{ arrivalWaypoint: ll(p), duration: dwell + "s" }] })),
+      vehicles: Array.from({ length: nDays }, () => JSON.parse(JSON.stringify(vehicle)))
+    }
+  };
+
+  msg(`Solving ${i.stops.length} stops${nDays > 1 ? " across " + nDays + " days" : ""} with Google's route optimizer (up to about a minute)...`);
+  let res;
+  try {
+    res = await fetch("https://routeoptimization.googleapis.com/v1/projects/" + encodeURIComponent(project) + ":optimizeTours", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + roAuth.token, "X-Goog-User-Project": project },
+      body: JSON.stringify(body)
+    });
+  } catch (e) {
+    throw new Error("The browser could not reach the Route Optimization API. Either you are offline, or Google does not allow this call from a web page (a browser security rule called CORS). If it is the second, the Standard optimizer still works; tell me and I can build a different route for this one.");
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error("Google returned an error: " + (data.error?.message || "HTTP " + res.status));
+
+  const routes = (data.routes || []).filter(r => r.visits && r.visits.length).sort((a, b) => (a.vehicleIndex || 0) - (b.vehicleIndex || 0));
+  if (!routes.length) throw new Error("Google returned no routes. Check the maximum hours per day and the stop list.");
+  const days = routes.map((r, d) => {
+    const vs = r.visits.map(v => v.shipmentIndex || 0);
+    const ordered = [i.start, ...vs.map(k => i.stops[k]), ...(E ? [i.end] : [])];
+    const dpts = [S, ...vs.map(k => stopPts[k]), ...(E ? [E] : [])];
+    const trans = r.transitions || [];
+    const legs = [];
+    for (let k = 0; k < dpts.length - 1; k++) {
+      const t = trans[k] || {};
+      legs.push({ sec: secs(t.travelDuration), m: Math.round(Number(t.travelDistanceMeters || 0)), a: dpts[k], b: dpts[k+1] });
+    }
+    let path = [];
+    if (r.routePolyline && r.routePolyline.points) path = decodePoly(r.routePolyline.points);
+    else trans.forEach(t => { if (t.routePolyline && t.routePolyline.points) path = path.concat(decodePoly(t.routePolyline.points)); });
+    const total = { sec: legs.reduce((s, l) => s + l.sec, 0), m: legs.reduce((s, l) => s + l.m, 0) };
+    const span = r.vehicleStartTime && r.vehicleEndTime ? Math.round((Date.parse(r.vehicleEndTime) - Date.parse(r.vehicleStartTime)) / 1000) : 0;
+    return { label: nDays > 1 ? `Day ${d + 1}` : "", ordered, legs, total, span, paths: [{ pts: path, part: d }], links: mapsLinks(ordered, "DRIVE") };
+  });
+  const skipped = (data.skippedShipments || []).map(s => i.stops[s.index || 0]).filter(Boolean);
+  let note = "Solved as a whole by Google's Route Optimization API using road traffic estimates for the departure time.";
+  if (skipped.length) note += ` ${skipped.length} stop(s) could not fit within your limits and were left out: ${skipped.slice(0, 10).map(a => parseLoc(a).label).join("; ")}${skipped.length > 10 ? "; ..." : ""}. Add days or hours and run again.`;
+  return { days, note };
+}
+
+$("go").onclick = async () => {
+  save();
+  const i = readInputs(); const e = validate(i);
+  if (e) return msg(e, "err");
+  const key = $("key").value.trim();
+  if (!key) return msg("Add an API key above, or use \"Open as typed (no key)\".", "err");
+  const mode = $("mode").value;
+  const dwell = Math.max(0, parseInt($("dwell").value, 10) || 0) * 60;
+  let start0;
+  if ($("when").value === "later") {
+    const t = new Date($("dt").value);
+    if (isNaN(t) || t < new Date()) return msg("Pick a departure time in the future.", "err");
+    start0 = t.getTime();
+  } else start0 = Date.now() + 60000;
+
+  $("go").disabled = true; msg("Working...");
+  try {
+    let out;
+    if ($("engine").value === "ro") out = await solveRO(i, key, start0, dwell);
+    else out = i.stops.length <= 25 ? await solveSmall(i, key, mode, start0) : await solveBig(i, key, mode, start0, dwell);
+    out.endFixed = !!i.end; out.start0 = start0; out.mode = $("engine").value === "ro" ? "DRIVE" : mode; out.key = key;
+    render(out); msg("");
+  } catch (err) { msg(err.message, "err"); }
+  finally { $("go").disabled = false; }
+};
+
+// ---- Detours: which stops add the most driving ----
+let lastRun = null;
+function ptsFromLegs(legs, ordered){
+  if (!legs || legs.length !== ordered.length - 1) return null;
+  const p = legs.map(l => l.a); p.push(legs[legs.length - 1].b);
+  return p.every(Boolean) ? p : null;
+}
+function computeDetours(pts, legs, endFixed){
+  const n = pts.length, rows = [], lastIdx = endFixed ? n - 2 : n - 1;
+  for (let k = 1; k <= lastIdx; k++) {
+    const inL = legs[k-1], outL = legs[k];
+    let addSec = inL.sec, addM = inL.m;
+    if (outL) {
+      const d1 = hav(pts[k-1], pts[k]), d2 = hav(pts[k], pts[k+1]), d3 = hav(pts[k-1], pts[k+1]), den = d1 + d2;
+      if (den > 0.01) {
+        addSec = Math.max(0, inL.sec + outL.sec - d3 * (inL.sec + outL.sec) / den);
+        addM = Math.max(0, inL.m + outL.m - d3 * (inL.m + outL.m) / den);
+      }
+    }
+    rows.push({ k, addSec, addM, exact: !outL });
+  }
+  return rows;
+}
+function topRows(){ return [...lastRun.rows].sort((a, b) => b.addSec - a.addSec).slice(0, 10); }
+function detourHtml(){
+  const R = lastRun; if (!R || !R.rows.length) return "";
+  const top = topRows(); R.top = top;
+  const multi = R.days.length > 1, max = Math.max(1, top[0].addSec);
+  let h = `<details open style="margin:14px 0"><summary>Biggest detours: stops that add the most driving</summary>
+    <div class="hint">Time and miles the route would save if that stop were skipped. Values marked ~ are estimates from the route you just ran.</div>
+    <table class="det"><tr><th>#</th><th>Stop</th><th class="n">Adds</th><th class="n">Miles</th><th class="n">Share of ${multi ? "day" : "trip"}</th></tr>`;
+  top.forEach(r => {
+    const d = R.days[r.d], pct = d.total && d.total.sec ? (100 * r.addSec / d.total.sec).toFixed(1) + "%" : "";
+    h += `<tr><td>${multi ? "D" + (r.d + 1) + "·" : ""}${r.k + 1}</td><td>${esc(parseLoc(d.ordered[r.k]).label)}<div class="bar" style="width:${Math.round(100 * r.addSec / max)}%"></div></td>
+      <td class="n">${r.exact ? "" : "~"}${fmtDur(r.addSec)}</td><td class="n">${r.exact ? "" : "~"}${(r.addM/1609.344).toFixed(1)}</td><td class="n">${pct}</td></tr>`;
+  });
+  h += `</table><div class="actions"><button class="secondary" id="verify">Verify top ${top.length} with Google</button></div>
+    <div class="hint">Verifying makes up to ${top.length} extra route requests (uses your API key) to get exact numbers. The top 5 are shown in red on the map.</div></details>`;
+  return h;
+}
+async function verifyDetours(){
+  const R = lastRun, btn = $("verify"); if (!R) return;
+  if (!R.key) return msg("Verification needs your API key.", "err");
+  btn.disabled = true;
+  try {
+    const dep = Math.max(R.start0 || 0, Date.now() + 60000);
+    const top = R.top.slice();
+    for (let j = 0; j < top.length; j++) {
+      const row = top[j], day = R.days[row.d];
+      btn.textContent = `Verifying ${j + 1} of ${top.length}...`;
+      if (!row.exact && day.pts[row.k + 1]) {
+        const body = { origin: ll(day.pts[row.k - 1]), destination: ll(day.pts[row.k + 1]), travelMode: R.mode, units: "IMPERIAL", departureTime: new Date(dep).toISOString() };
+        if (R.mode === "DRIVE") body.routingPreference = "TRAFFIC_AWARE_OPTIMAL";
+        const r = await routeCall(R.key, body);
+        const inL = day.legs[row.k - 1], outL = day.legs[row.k];
+        row.addSec = Math.max(0, inL.sec + outL.sec - secs(r.duration));
+        row.addM = Math.max(0, inL.m + outL.m - (r.distanceMeters || 0));
+        row.exact = true;
+      }
+    }
+    const holder = document.querySelector("#result details");
+    const tmp = document.createElement("div"); tmp.innerHTML = detourHtml();
+    holder.replaceWith(tmp.firstElementChild);
+    $("verify").textContent = "Verified"; $("verify").disabled = true;
+  } catch (err) { btn.disabled = false; btn.textContent = "Verify top 10 with Google"; msg("Verification failed: " + err.message, "err"); }
+}
+
+// ---- Results ----
+function dayHtml(d, di, multi, endFixed){
+  let h = `<ol class="route">`;
+  d.ordered.forEach((a, k) => {
+    const leg = d.legs && d.legs[k] ? `<div class="leg">Next leg: ${fmtDur(d.legs[k].sec)} · ${fmtDist(d.legs[k].m)}</div>` : "";
+    const label = k === 0 ? "Start" : (k === d.ordered.length - 1 ? "End" : "Stop " + k);
+    h += `<li><div class="num"${multi ? ` style="background:${DAYCOL[di % DAYCOL.length]}"` : ""}>${k+1}</div><div><div><b>${label}</b> · ${esc(parseLoc(a).label)}</div>${leg}</div></li>`;
+  });
+  h += `</ol>`;
+  const links = d.links || [];
+  if (links.length) {
+    h += `<div class="actions">` + links.map(l => `<a class="btn" href="${l.url}" target="_blank" rel="noopener">${links.length > 1 ? `Maps: points ${l.from}–${l.to}` : "Open in Google Maps"}</a>`).join("") + `</div>`;
+    if (links.length > 1) h += `<div class="hint">Google Maps links hold about 10 points each, so this route opens in ${links.length} parts. Each part starts where the last one ended.</div>`;
+  }
+  if (!multi) return h;
+  const nStops = d.ordered.length - 1 - (endFixed ? 1 : 0);
+  return `<details ${di === 0 ? "open" : ""} style="margin-top:14px"><summary><span class="dot" style="background:${DAYCOL[di % DAYCOL.length]}"></span>${esc(d.label)} · ${nStops} stops${d.total ? " · " + fmtDur(d.total.sec) + " driving · " + fmtDist(d.total.m) : ""}</summary>${h}</details>`;
+}
+function summaryHtml(days, endFixed){
+  let h = `<table class="det"><tr><th>Day</th><th class="n">Stops</th><th class="n">Driving</th><th class="n">Miles</th><th class="n">Day length</th></tr>`;
+  let ts = 0, tm = 0, tn = 0;
+  days.forEach((d, di) => {
+    const n = d.ordered.length - 1 - (endFixed ? 1 : 0); ts += d.total.sec; tm += d.total.m; tn += n;
+    h += `<tr><td><span class="dot" style="background:${DAYCOL[di % DAYCOL.length]}"></span>${esc(d.label)}</td><td class="n">${n}</td><td class="n">${fmtDur(d.total.sec)}</td><td class="n">${(d.total.m/1609.344).toFixed(0)}</td><td class="n">${d.span ? fmtDur(d.span) : ""}</td></tr>`;
+  });
+  return h + `<tr><td><b>Total</b></td><td class="n"><b>${tn}</b></td><td class="n"><b>${fmtDur(ts)}</b></td><td class="n"><b>${(tm/1609.344).toFixed(0)}</b></td><td></td></tr></table>`;
+}
+
+function render(out){
+  const days = out.days, multi = days.length > 1, endFixed = !!out.endFixed;
+  lastRun = { days: days.map(d => ({ ...d, pts: ptsFromLegs(d.legs, d.ordered) })), rows: [], endFixed, start0: out.start0, mode: out.mode, key: out.key };
+  lastRun.days.forEach((d, di) => { if (d.pts) computeDetours(d.pts, d.legs, endFixed).forEach(r => lastRun.rows.push({ ...r, d: di })); });
+  const hasPaths = days.some(d => d.paths && d.paths.length);
+
+  let h = hasPaths ? '<div id="map"></div>' : "";
+  if (multi) h += summaryHtml(days, endFixed);
+  else if (days[0].total) h += `<div class="totals"><span>Total drive: ${fmtDur(days[0].total.sec)}</span><span>${fmtDist(days[0].total.m)}</span><span>${days[0].ordered.length} points</span></div>`;
+  if (out.note) h += `<div class="msg warn">${esc(out.note)}</div>`;
+  h += detourHtml();
+  days.forEach((d, di) => { h += dayHtml(d, di, multi, endFixed); });
+  h += `<div class="actions"><button class="secondary" id="copy">Copy order</button></div>`;
+  $("result").innerHTML = h; $("result").style.display = "";
+
+  if (hasPaths) {
+    const hot = new Set(lastRun.top ? lastRun.top.slice(0, 5).map(r => r.d + ":" + r.k) : []);
+    const markers = [];
+    lastRun.days.forEach((d, di) => {
+      const pts = d.pts || d.ordered.map(a => parseLoc(a).pt);
+      pts.forEach((p, k) => {
+        if (!p || (di > 0 && k === 0)) return;
+        const isHot = hot.has(di + ":" + k);
+        markers.push({
+          p, text: String(k + 1), z: k === 0 ? 1000 : (isHot ? 500 : k),
+          color: k === 0 ? "#0b8043" : (isHot ? "#d93025" : (multi ? DAYCOL[di % DAYCOL.length] : "#1a73e8")),
+          popup: `<b>${multi ? esc(d.label) + " · " : ""}${k + 1}.</b> ${esc(parseLoc(d.ordered[k]).label)}`
+        });
+      });
+    });
+    drawMap(markers, days.flatMap(d => d.paths || []), $("key").value.trim());
+  }
+  if ($("verify")) $("verify").onclick = verifyDetours;
+  $("copy").onclick = async () => {
+    const text = days.map(d => (multi ? d.label + "\n" : "") + d.ordered.map((a, k) => { const p = parseLoc(a); return `${k+1}. ${p.label}` + (p.pt ? ` (${p.q})` : ""); }).join("\n")).join("\n\n");
+    try { await navigator.clipboard.writeText(text); $("copy").textContent = "Copied"; } catch (e) { $("copy").textContent = "Copy failed"; }
+  };
+}
+</script>
+
+</body>
+</html>
