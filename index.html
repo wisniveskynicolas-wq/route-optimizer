@@ -113,9 +113,15 @@
         <div><label for="clientid">OAuth client ID</label><input id="clientid" placeholder="123456-abc.apps.googleusercontent.com" autocomplete="off"></div>
         <div><label for="project">Google Cloud project ID</label><input id="project" placeholder="my-route-project" autocomplete="off"></div>
       </div>
+      <label for="daystyle">Multi-day style</label>
+      <select id="daystyle">
+        <option value="separate">Separate trips: every day starts at the Start location</option>
+        <option value="chain">Continuous: each day starts where the previous day ended</option>
+      </select>
       <div class="row">
-        <div><label for="days">Days (number of separate trips)</label><input type="number" id="days" min="1" max="10" value="1"></div>
-        <div><label for="maxh">Max hours per day</label><input type="number" id="maxh" min="1" step="0.5" placeholder="No limit"><div class="hint">Includes driving and time at stops. Required when days is more than 1.</div></div>
+        <div><label for="days">Days (separate trips only)</label><input type="number" id="days" min="1" max="10" value="1"></div>
+        <div><label for="maxdrive">Max driving hours per day</label><input type="number" id="maxdrive" min="1" step="0.5" placeholder="No limit"><div class="hint">Driving time only, not time at stops.</div></div>
+        <div><label for="maxh">Max total hours per day</label><input type="number" id="maxh" min="1" step="0.5" placeholder="No limit"><div class="hint">Driving plus time at stops. Optional; use either or both. At least one is needed to split into days.</div></div>
       </div>
       <div class="actions" style="align-items:center">
         <button class="secondary" id="signin" type="button">Sign in with Google</button>
@@ -150,8 +156,11 @@ const store = {
   get(k){ try { return localStorage.getItem(k) } catch(e){ return null } },
   set(k,v){ try { localStorage.setItem(k,v) } catch(e){} }
 };
-const FIELDS = ["key","start","end","stops","clientid","project","days","maxh"];
+const FIELDS = ["key","start","end","stops","clientid","project","days","maxh","maxdrive"];
 FIELDS.forEach(id => { const v = store.get("ro_"+id); if (v) $(id).value = v; });
+if (store.get("ro_daystyle")==="chain") $("daystyle").value = "chain";
+const syncStyle = () => { $("days").disabled = $("daystyle").value === "chain"; };
+syncStyle(); $("daystyle").onchange = () => { syncStyle(); save(); };
 if (store.get("ro_round")==="1") $("roundtrip").checked = true;
 if (store.get("ro_engine")==="ro") $("engine").value = "ro";
 if (!$("key").value) $("keybox").open = true;
@@ -171,6 +180,7 @@ function save(){
   FIELDS.forEach(id => store.set("ro_"+id, $(id).value));
   store.set("ro_round", $("roundtrip").checked ? "1" : "0");
   store.set("ro_engine", $("engine").value);
+  store.set("ro_daystyle", $("daystyle").value);
 }
 function msg(text, cls){ $("status").innerHTML = text ? `<div class="msg ${cls||""}"></div>` : ""; if (text) $("status").firstChild.textContent = text; }
 function esc(s){ return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
@@ -472,9 +482,10 @@ async function solveRO(i, key, start0, dwell){
   if (!roAuth.token || Date.now() > roAuth.exp - 60000) throw new Error("Sign in with Google first (button in the Exact optimizer panel).");
   const project = $("project").value.trim();
   if (!project) throw new Error("Enter your Google Cloud project ID in the Exact optimizer panel.");
-  const nDays = Math.max(1, Math.min(10, parseInt($("days").value, 10) || 1));
-  const maxH = parseFloat($("maxh").value) || 0;
-  if (nDays > 1 && !maxH) throw new Error("With more than one day, set a maximum number of hours per day.");
+  const chain = $("daystyle").value === "chain";
+  const nDays = chain ? 1 : Math.max(1, Math.min(10, parseInt($("days").value, 10) || 1));
+  const maxH = parseFloat($("maxh").value) || 0, maxD = parseFloat($("maxdrive").value) || 0;
+  if (!chain && nDays > 1 && !maxH && !maxD) throw new Error("With more than one day, set a maximum driving hours (or total hours) per day.");
 
   const names = [i.start, ...i.stops, ...(i.end ? [i.end] : [])];
   const pts = await geocodeAll(names, key);
@@ -488,18 +499,19 @@ async function solveRO(i, key, start0, dwell){
     startTimeWindows: [{ startTime: iso(dep), endTime: iso(dep) }]
   };
   if (E) vehicle.endWaypoint = ll(E);
-  if (maxH) vehicle.routeDurationLimit = { maxDuration: Math.round(maxH * 3600) + "s" };
+  if (!chain && maxH) vehicle.routeDurationLimit = { maxDuration: Math.round(maxH * 3600) + "s" };
+  if (!chain && maxD) vehicle.travelDurationLimit = { maxDuration: Math.round(maxD * 3600) + "s" };
   const body = {
     timeout: "45s", considerRoadTraffic: true, populatePolylines: true, populateTransitionPolylines: true,
     model: {
-      globalStartTime: iso(dep), globalEndTime: iso(dep + 7 * 86400000),
+      globalStartTime: iso(dep), globalEndTime: iso(dep + (chain ? 14 : 7) * 86400000),
       shipments: stopPts.map((p, k) => ({ label: String(k), penaltyCost: 1000000,
         deliveries: [{ arrivalWaypoint: ll(p), duration: dwell + "s" }] })),
       vehicles: Array.from({ length: nDays }, () => JSON.parse(JSON.stringify(vehicle)))
     }
   };
 
-  msg(`Solving ${i.stops.length} stops${nDays > 1 ? " across " + nDays + " days" : ""} with Google's route optimizer (up to about a minute)...`);
+  msg(`Solving ${i.stops.length} stops${chain ? " as one continuous trip" : (nDays > 1 ? " across " + nDays + " days" : "")} with Google's route optimizer (up to about a minute)...`);
   let res;
   try {
     res = await fetch("https://routeoptimization.googleapis.com/v1/projects/" + encodeURIComponent(project) + ":optimizeTours", {
@@ -515,26 +527,57 @@ async function solveRO(i, key, start0, dwell){
 
   const routes = (data.routes || []).filter(r => r.visits && r.visits.length).sort((a, b) => (a.vehicleIndex || 0) - (b.vehicleIndex || 0));
   if (!routes.length) throw new Error("Google returned no routes. Check the maximum hours per day and the stop list.");
-  const days = routes.map((r, d) => {
-    const vs = r.visits.map(v => v.shipmentIndex || 0);
-    const ordered = [i.start, ...vs.map(k => i.stops[k]), ...(E ? [i.end] : [])];
-    const dpts = [S, ...vs.map(k => stopPts[k]), ...(E ? [E] : [])];
-    const trans = r.transitions || [];
-    const legs = [];
-    for (let k = 0; k < dpts.length - 1; k++) {
-      const t = trans[k] || {};
-      legs.push({ sec: secs(t.travelDuration), m: Math.round(Number(t.travelDistanceMeters || 0)), a: dpts[k], b: dpts[k+1] });
-    }
-    let path = [];
-    if (r.routePolyline && r.routePolyline.points) path = decodePoly(r.routePolyline.points);
-    else trans.forEach(t => { if (t.routePolyline && t.routePolyline.points) path = path.concat(decodePoly(t.routePolyline.points)); });
-    const total = { sec: legs.reduce((s, l) => s + l.sec, 0), m: legs.reduce((s, l) => s + l.m, 0) };
-    const span = r.vehicleStartTime && r.vehicleEndTime ? Math.round((Date.parse(r.vehicleEndTime) - Date.parse(r.vehicleStartTime)) / 1000) : 0;
-    return { label: nDays > 1 ? `Day ${d + 1}` : "", ordered, legs, total, span, paths: [{ pts: path, part: d }], links: mapsLinks(ordered, "DRIVE") };
-  });
   const skipped = (data.skippedShipments || []).map(s => i.stops[s.index || 0]).filter(Boolean);
-  let note = "Solved as a whole by Google's Route Optimization API using road traffic estimates for the departure time.";
-  if (skipped.length) note += ` ${skipped.length} stop(s) could not fit within your limits and were left out: ${skipped.slice(0, 10).map(a => parseLoc(a).label).join("; ")}${skipped.length > 10 ? "; ..." : ""}. Add days or hours and run again.`;
+  const tpath = t => t && t.routePolyline && t.routePolyline.points ? decodePoly(t.routePolyline.points) : [];
+  let days, note;
+
+  if (!chain) {
+    days = routes.map((r, d) => {
+      const vs = r.visits.map(v => v.shipmentIndex || 0);
+      const ordered = [i.start, ...vs.map(k => i.stops[k]), ...(E ? [i.end] : [])];
+      const dpts = [S, ...vs.map(k => stopPts[k]), ...(E ? [E] : [])];
+      const trans = r.transitions || [];
+      const legs = [];
+      for (let k = 0; k < dpts.length - 1; k++) {
+        const t = trans[k] || {};
+        legs.push({ sec: secs(t.travelDuration), m: Math.round(Number(t.travelDistanceMeters || 0)), a: dpts[k], b: dpts[k+1] });
+      }
+      let path = r.routePolyline && r.routePolyline.points ? decodePoly(r.routePolyline.points) : [];
+      if (!path.length) trans.forEach(t => { path = path.concat(tpath(t)); });
+      const total = { sec: legs.reduce((s, l) => s + l.sec, 0), m: legs.reduce((s, l) => s + l.m, 0) };
+      const span = r.vehicleStartTime && r.vehicleEndTime ? Math.round((Date.parse(r.vehicleEndTime) - Date.parse(r.vehicleStartTime)) / 1000) : 0;
+      return { label: nDays > 1 ? `Day ${d + 1}` : "", hasEnd: !!E, ordered, legs, total, span, paths: [{ pts: path, part: d }], links: mapsLinks(ordered, "DRIVE") };
+    });
+    note = "Solved as a whole by Google's Route Optimization API using road traffic estimates for the departure time.";
+  } else {
+    // One continuous route, cut into days whenever the next leg plus stop time would pass the daily limit.
+    const r = routes[0], trans = r.transitions || [];
+    const vs = r.visits.map(v => v.shipmentIndex || 0), nv = vs.length;
+    const limit = maxH ? maxH * 3600 : Infinity, driveLimit = maxD ? maxD * 3600 : Infinity;
+    const allPts = [S, ...vs.map(k => stopPts[k]), ...(E ? [E] : [])];
+    const allNames = [i.start, ...vs.map(k => i.stops[k]), ...(E ? [i.end] : [])];
+    const legAt = j => { const t = trans[j] || {}; return { sec: secs(t.travelDuration), m: Math.round(Number(t.travelDistanceMeters || 0)), a: allPts[j], b: allPts[j+1], path: tpath(t) }; };
+    const groups = []; let cur = { from: 0, legIdx: [], elapsed: 0, drive: 0 };
+    for (let v = 0; v < nv; v++) {
+      const L = legAt(v), c = L.sec + dwell;
+      if (cur.legIdx.length && (cur.elapsed + c > limit || cur.drive + L.sec > driveLimit)) { groups.push(cur); cur = { from: v, legIdx: [], elapsed: 0, drive: 0 }; }
+      cur.legIdx.push(v); cur.elapsed += c; cur.drive += L.sec;
+    }
+    if (E) cur.legIdx.push(nv);                       // final leg to the end location belongs to the last day
+    groups.push(cur);
+    days = groups.map((g, d) => {
+      const legs = g.legIdx.map(legAt);
+      const ordered = [allNames[g.from], ...g.legIdx.map(j => allNames[j + 1])];
+      const path = legs.flatMap(l => l.path);
+      const total = { sec: legs.reduce((s, l) => s + l.sec, 0), m: legs.reduce((s, l) => s + l.m, 0) };
+      const stopsInDay = g.legIdx.filter(j => j < nv).length;
+      return { label: groups.length > 1 ? `Day ${d + 1}` : "", hasEnd: !!E && d === groups.length - 1, ordered, legs: legs.map(({ sec, m, a, b }) => ({ sec, m, a, b })), total,
+        span: total.sec + dwell * stopsInDay, paths: [{ pts: path, part: d }], links: mapsLinks(ordered, "DRIVE") };
+    });
+    note = "Planned as one continuous trip by Google's Route Optimization API, then cut into days at your hours limit. Each day starts at the previous day's last stop. Later days use traffic estimates from the hours right after your departure, not the same time of day, so treat their drive times as approximate.";
+    if (!maxH && !maxD) note += " No daily limit was set, so this is a single day.";
+  }
+  if (skipped.length) note += ` ${skipped.length} stop(s) could not be scheduled and were left out: ${skipped.slice(0, 10).map(a => parseLoc(a).label).join("; ")}${skipped.length > 10 ? "; ..." : ""}.`;
   return { days, note };
 }
 
@@ -646,14 +689,14 @@ function dayHtml(d, di, multi, endFixed){
     if (links.length > 1) h += `<div class="hint">Google Maps links hold about 10 points each, so this route opens in ${links.length} parts. Each part starts where the last one ended.</div>`;
   }
   if (!multi) return h;
-  const nStops = d.ordered.length - 1 - (endFixed ? 1 : 0);
+  const nStops = d.ordered.length - 1 - (d.hasEnd !== undefined ? (d.hasEnd ? 1 : 0) : (endFixed ? 1 : 0));
   return `<details ${di === 0 ? "open" : ""} style="margin-top:14px"><summary><span class="dot" style="background:${DAYCOL[di % DAYCOL.length]}"></span>${esc(d.label)} · ${nStops} stops${d.total ? " · " + fmtDur(d.total.sec) + " driving · " + fmtDist(d.total.m) : ""}</summary>${h}</details>`;
 }
 function summaryHtml(days, endFixed){
   let h = `<table class="det"><tr><th>Day</th><th class="n">Stops</th><th class="n">Driving</th><th class="n">Miles</th><th class="n">Day length</th></tr>`;
   let ts = 0, tm = 0, tn = 0;
   days.forEach((d, di) => {
-    const n = d.ordered.length - 1 - (endFixed ? 1 : 0); ts += d.total.sec; tm += d.total.m; tn += n;
+    const n = d.ordered.length - 1 - (d.hasEnd !== undefined ? (d.hasEnd ? 1 : 0) : (endFixed ? 1 : 0)); ts += d.total.sec; tm += d.total.m; tn += n;
     h += `<tr><td><span class="dot" style="background:${DAYCOL[di % DAYCOL.length]}"></span>${esc(d.label)}</td><td class="n">${n}</td><td class="n">${fmtDur(d.total.sec)}</td><td class="n">${(d.total.m/1609.344).toFixed(0)}</td><td class="n">${d.span ? fmtDur(d.span) : ""}</td></tr>`;
   });
   return h + `<tr><td><b>Total</b></td><td class="n"><b>${tn}</b></td><td class="n"><b>${fmtDur(ts)}</b></td><td class="n"><b>${(tm/1609.344).toFixed(0)}</b></td><td></td></tr></table>`;
